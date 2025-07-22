@@ -158,7 +158,7 @@ static void drawtext(AVFrame *pic, int x, int y, const char *txt, uint8_t *color
     int font_height;
     int i;
 
-    font = avpriv_cga_font,   font_height =  8;
+    font = avpriv_cga_font_get(),   font_height =  8;
 
     if (y + 8 >= pic->height ||
         x + strlen(txt) * 8 >= pic->width)
