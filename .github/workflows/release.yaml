@@ -1,0 +1,183 @@
+name: FFmpeg ARM64EC Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg version to release"
+        required: true
+
+env:
+  FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version }}
+
+jobs:
+  build-release:
+    name: Build & Test FFmpeg ARM64EC
+    # Native ARM64 Windows 11 runner
+    runs-on: windows-11-arm
+    permissions:
+      contents: write
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Set up MSYS2 (CLANGARM64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            git
+            nasm
+            yasm
+            diffutils
+            make
+            pkg-config
+            perl
+            rsync
+
+      - name: Clone gas-preprocessor
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/FFmpeg/gas-preprocessor.git C:\gas-preprocessor
+          Write-Host "gas-preprocessor cloned to C:\gas-preprocessor"
+          Get-ChildItem C:\gas-preprocessor
+
+      - name: Fix PATH
+        run: |
+          # Rename MSYS2's GNU link.exe so MSVC link.exe is found instead
+          mv /usr/bin/link.exe /usr/bin/link_gnu.exe
+          echo "$(cygpath -u "$VCToolsInstallDir")bin/HostARM64/ARM64" >> $GITHUB_PATH
+          echo "/c/gas-preprocessor" >> $GITHUB_PATH
+
+      - name: Verify toolchain in MSYS2
+        run: |
+          set -eo pipefail
+          echo "==> Checking MSVC tools on PATH ..."
+          which cl.exe       && cl.exe        || echo "WARNING: cl.exe not found"
+          which link.exe     && link.exe      || echo "WARNING: link.exe not found"
+          which lib.exe                       || echo "WARNING: lib.exe not found"
+          which armasm64.exe                  || echo "WARNING: armasm64.exe not found"
+          echo ""
+          echo "==> Checking gas-preprocessor ..."
+          ls /c/gas-preprocessor/
+          perl /c/gas-preprocessor/gas-preprocessor.pl --help || true
+          echo ""
+          echo "==> NASM / YASM ..."
+          nasm --version
+          yasm --version
+
+      - name: Configure FFmpeg for ARM64EC
+        run: |
+          set -eo pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+
+          echo "==> Running ./configure ..."
+          ./configure \
+            --toolchain=msvc \
+            --target-os=win64 \
+            --arch=arm64 \
+            --cc=cl.exe \
+            --cxx=cl.exe \
+            --ld=link.exe \
+            --ar="lib.exe -machine:arm64ec" \
+            --extra-cflags="-arm64EC" \
+            --extra-cxxflags="-arm64EC" \
+            --extra-ldflags="/machine:arm64ec" \
+            --as="armasm64.exe -machine ARM64EC" \
+            --enable-shared \
+            --disable-doc \
+            --prefix=/c/ffmpeg-arm64ec \
+            --samples=/c/fate-samples
+
+          echo "==> Configure complete."
+
+      - name: Build FFmpeg
+        run: |
+          set -eo pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+
+          echo "==> Building with $(nproc) parallel jobs ..."
+          make -j$(nproc)
+          echo "==> Build complete."
+
+      - name: Install FFmpeg
+        run: |
+          set -eo pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          make install
+          echo "==> Installed artifacts:"
+          ls /c/ffmpeg-arm64ec/bin/ || true
+          ls /c/ffmpeg-arm64ec/lib/ || true
+
+      - name: Package release artifacts
+        shell: pwsh
+        run: |
+          $prefix  = "C:\ffmpeg-arm64ec"
+          $zipName = "ffmpeg-${{ env.FFMPEG_VERSION }}-win-arm64ec.zip"
+          $zipPath = "${{ github.workspace }}\$zipName"
+
+          Write-Host "==> Packaging $zipName ..."
+          Compress-Archive -Path "$prefix\*" -DestinationPath $zipPath -Force
+
+          "RELEASE_ZIP=$zipPath"      | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "==> Package ready: $zipPath"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ env.FFMPEG_VERSION }}-win-arm64ec
+          path: ${{ env.RELEASE_ZIP }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ env.FFMPEG_VERSION }}-arm64ec"
+          name: "FFmpeg ${{ env.FFMPEG_VERSION }} ARM64EC"
+          body: |
+            ## FFmpeg ${{ env.FFMPEG_VERSION }} — Windows ARM64EC Shared Libraries
+
+            Built **natively** on a Windows 11 ARM64 runner using the MSVC toolchain.
+
+            ### Build details
+            | Property        | Value                               |
+            |-----------------|-------------------------------------|
+            | FFmpeg version  | `${{ env.FFMPEG_VERSION }}`         |
+            | Runner          | `windows-11-arm` (native ARM64)     |
+            | MSYS2 subsystem | `CLANGARM64`                        |
+            | Target OS       | Windows (win64)                     |
+            | Architecture    | arm64 / ARM64EC                     |
+            | Compiler        | MSVC `cl.exe`                       |
+            | Assembler       | `armasm64.exe -machine ARM64EC`     |
+            | gas-preprocessor| `FFmpeg/gas-preprocessor`           |
+            | Linker flags    | `/machine:arm64ec`                  |
+            | Build type      | Shared                              |
+            | Trigger         | `${{ github.event_name }}`          |
+            | Commit          | `${{ github.sha }}`                 |
+
+            ### Contents
+            - `bin/` — AVCodec, AVFormat, AVUtil, SWScale, SWResample DLLs
+            - `lib/` — Import libraries (`.lib`)
+            - `include/` — Public headers
+
+          files: ${{ env.RELEASE_ZIP }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
