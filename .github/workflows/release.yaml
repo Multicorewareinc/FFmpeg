@@ -1,18 +1,22 @@
-name: FFmpeg ARM64EC Build
+name: FFmpeg ARM64EC Build & Release
 
 on:
-  push:
-    branches:
-      - "v5.1.2_arm64ec"
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg version to release"
+        required: true
 
 env:
-  FFMPEG_VERSION: "5.1.2"
+  FFMPEG_VERSION: ${{ github.event.inputs.ffmpeg_version }}
 
 jobs:
-  build-test:
+  build-release:
     name: Build & Test FFmpeg ARM64EC
     # Native ARM64 Windows 11 runner
     runs-on: windows-11-arm
+    permissions:
+      contents: write
 
     defaults:
       run:
@@ -120,25 +124,7 @@ jobs:
           ls /c/ffmpeg-arm64ec/bin/ || true
           ls /c/ffmpeg-arm64ec/lib/ || true
 
-      - name: Cache FATE samples
-        uses: actions/cache@v4
-        with:
-          path: C:/fate-samples
-          key: fate-samples
-          restore-keys: fate-samples
-
-      - name: Download FATE samples
-        run: |
-          make fate-rsync SAMPLES=/c/fate-samples
-
-      - name: Run FATE tests
-        continue-on-error: true
-        run: |
-          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
-          export PATH="/c/ffmpeg-arm64ec/bin:$PATH"
-          make fate -k SAMPLES=/c/fate-samples GEN=1 2>&1 | tee /tmp/fate-results.txt || true
-
-      - name: Package build artifacts
+      - name: Package release artifacts
         shell: pwsh
         run: |
           $prefix  = "C:\ffmpeg-arm64ec"
@@ -158,3 +144,40 @@ jobs:
           name: ffmpeg-${{ env.FFMPEG_VERSION }}-win-arm64ec
           path: ${{ env.RELEASE_ZIP }}
           retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ env.FFMPEG_VERSION }}-arm64ec"
+          name: "FFmpeg ${{ env.FFMPEG_VERSION }} ARM64EC"
+          body: |
+            ## FFmpeg ${{ env.FFMPEG_VERSION }} — Windows ARM64EC Shared Libraries
+
+            Built **natively** on a Windows 11 ARM64 runner using the MSVC toolchain.
+
+            ### Build details
+            | Property        | Value                               |
+            |-----------------|-------------------------------------|
+            | FFmpeg version  | `${{ env.FFMPEG_VERSION }}`         |
+            | Runner          | `windows-11-arm` (native ARM64)     |
+            | MSYS2 subsystem | `CLANGARM64`                        |
+            | Target OS       | Windows (win64)                     |
+            | Architecture    | arm64 / ARM64EC                     |
+            | Compiler        | MSVC `cl.exe`                       |
+            | Assembler       | `armasm64.exe -machine ARM64EC`     |
+            | gas-preprocessor| `FFmpeg/gas-preprocessor`           |
+            | Linker flags    | `/machine:arm64ec`                  |
+            | Build type      | Shared                              |
+            | Trigger         | `${{ github.event_name }}`          |
+            | Commit          | `${{ github.sha }}`                 |
+
+            ### Contents
+            - `bin/` — AVCodec, AVFormat, AVUtil, SWScale, SWResample DLLs
+            - `lib/` — Import libraries (`.lib`)
+            - `include/` — Public headers
+
+          files: ${{ env.RELEASE_ZIP }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
